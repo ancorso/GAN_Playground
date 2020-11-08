@@ -5,6 +5,7 @@ using Flux.Losses: logitbinarycrossentropy
 using Flux.Data: DataLoader
 using Flux.Optimise: train!, @epochs
 using Parameters, Printf, Random
+using BSON: @save
 
 
 @with_kw struct HyperParameters
@@ -12,15 +13,17 @@ using Parameters, Printf, Random
 	latent_dim::Int = 100
 	nclasses::Int = 10
 	epochs::Int = 20
-	verbose_freq::Int = 100
-	output_x::Int = 6
-	output_y::Int = 6
+	verbose_freq::Int = 1000
+	output_x::Int = 10    # for visualization of generator
+	output_y::Int = 10    # for visualization of generator
 	αᴰ::Float64 = 0.0002 # discriminator learning rate
 	αᴳ::Float64 = 0.0002 # generator learning rate
     device::Function = cpu # device to send operations to. Can be cpu or gpu
     
-    # Generator architecture parameters
-    latent_hidden::Int = 6272 # must be a multiple of 49
+    # Generator architecture parameters - default 128, 128, 64
+    latent_channels::Int = 128
+    conv_1_channels::Int = 128
+    conv_2_channels::Int = 64
 end
 
 struct Discriminator
@@ -28,8 +31,8 @@ struct Discriminator
     d_common
 end
 
-function Discriminator(params::HyperParameters)
-	d_labels = Chain(Dense(params.nclasses,784), x-> reshape(x, 28, 28, 1, size(x, 2))) |> params.device
+function Discriminator(hp::HyperParameters)
+	d_labels = Chain(Dense(hp.nclasses,784), x-> reshape(x, 28, 28, 1, size(x, 2))) |> hp.device
     d_common = Chain(Conv((3,3), 2=>128, pad=(1,1), stride=(2,2)),
                   x-> leakyrelu.(x, 0.2f0),
                   Dropout(0.4),
@@ -37,7 +40,7 @@ function Discriminator(params::HyperParameters)
                   x-> leakyrelu.(x, 0.2f0),
                   x-> reshape(x, :, size(x, 4)),
                   Dropout(0.4),
-                  Dense(6272, 1)) |> params.device
+                  Dense(6272, 1)) |> hp.device
     Discriminator(d_labels, d_common)
 end
 
@@ -53,16 +56,16 @@ struct Generator
     g_common
 end
 
-function Generator(params::HyperParameters)
-    g_labels = Chain(Dense(params.nclasses, 49), x-> reshape(x, 7 , 7 , 1 , size(x, 2))) |> params.device
-    latent_channels = Int(params.latent_hidden / 49)
-    g_latent = Chain(Dense(params.latent_dim, params.latent_hidden), x-> leakyrelu.(x, 0.2f0), x-> reshape(x, 7, 7, latent_channels, size(x, 2))) |> params.device
-    g_common = Chain(ConvTranspose((4, 4), latent_channels+1=>latent_channels; stride=2, pad=1),
-            BatchNorm(latent_channels, leakyrelu),
+function Generator(hp::HyperParameters)
+    latent_im_nodes = 7*7
+    g_labels = Chain(Dense(hp.nclasses, latent_im_nodes), x-> reshape(x, 7, 7, 1 , size(x, 2))) |> hp.device
+    g_latent = Chain(Dense(hp.latent_dim, hp.latent_channels * latent_im_nodes), x-> leakyrelu.(x, 0.2f0), x-> reshape(x, 7, 7, hp.latent_channels, size(x, 2))) |> hp.device
+    g_common = Chain(ConvTranspose((4, 4), hp.latent_channels+1=>hp.conv_1_channels; stride=2, pad=1),
+            BatchNorm(hp.latent_channels, leakyrelu),
             Dropout(0.25),
-            ConvTranspose((4, 4), latent_channels=>64; stride=2, pad=1),
+            ConvTranspose((4, 4), hp.conv_1_channels=>hp.conv_2_channels; stride=2, pad=1),
             BatchNorm(64, leakyrelu),
-            Conv((7, 7), 64=>1, tanh; stride=1, pad=3)) |> gpu
+            Conv((7, 7), hp.conv_2_channels=>1, tanh; stride=1, pad=3)) |> hp.device
     Generator(g_labels, g_latent, g_common)
 end
 
@@ -104,8 +107,8 @@ end
 
 # Function that returns random input for the generator
 function rand_input(hp)
-   x = randn(hp.latent_dim, hp.batch_size) |> gpu
-   y = Float32.(Flux.onehotbatch(rand(0:hp.nclasses-1, hp.batch_size), 0:hp.nclasses-1)) |> gpu
+   x = randn(hp.latent_dim, hp.batch_size) |> hp.device
+   y = Float32.(Flux.onehotbatch(rand(0:hp.nclasses-1, hp.batch_size), 0:hp.nclasses-1)) |> hp.device
    x, y
 end
 
@@ -113,12 +116,12 @@ end
 function train(;hp = HyperParameters(), G = Generator(hp), D = Discriminator(hp), optG = ADAM(hp.αᴳ, (0.5, 0.99)), optD = ADAM(hp.αᴰ, (0.5, 0.99)))
     # Load MNIST dataset
     images, labels = MLDatasets.MNIST.traindata(Float32)
-    images = reshape(2f0 .* images .- 1f0, 28, 28, 1, :) |> gpu # Normalize to [-1, 1]
-    y = Float32.(Flux.onehotbatch(labels, 0:hp.nclasses-1)) |> gpu
+    images = reshape(2f0 .* images .- 1f0, 28, 28, 1, :) |> hp.device # Normalize to [-1, 1]
+    y = Float32.(Flux.onehotbatch(labels, 0:hp.nclasses-1)) |> hp.device
     data = DataLoader((images, y), batchsize=hp.batch_size, shuffle = true)
 
-    fixed_noise = [randn(hp.latent_dim, 1) |> gpu for _=1:hp.output_x * hp.output_y]
-    fixed_labels = [Float32.(Flux.onehotbatch(rand(0:hp.nclasses-1, 1), 0:hp.nclasses-1)) |> gpu
+    fixed_noise = [randn(hp.latent_dim, 1) |> hp.device for _=1:hp.output_x * hp.output_y]
+    fixed_labels = [Float32.(Flux.onehotbatch(rand(0:hp.nclasses-1, 1), 0:hp.nclasses-1)) |> hp.device
                              for _ =1:hp.output_x * hp.output_y]
 
     # Training
@@ -135,11 +138,25 @@ function train(;hp = HyperParameters(), G = Generator(hp), D = Discriminator(hp)
 	G
 end
 
-# Train the network:
-G = train()
+# Train several networks
+    # Generator architecture parameters - default 128, 128, 64
+    latent_channels::Int = 128
+    conv_1_channels::Int = 128
+    conv_2_channels::Int = 64
+params = [HyperParameters(latent_channels=128, conv_1_channels=128, conv_2_channels=64),
+          HyperParameters(latent_channels=64, conv_1_channels=64, conv_2_channels=32),
+          HyperParameters(latent_channels=32, conv_1_channels=32, conv_2_channels=16),
+          HyperParameters(latent_channels=16, conv_1_channels=16, conv_2_channels=8),
+          HyperParameters(latent_channels=8, conv_1_channels=8, conv_2_channels=4),
+          HyperParameters(latent_channels=4, conv_1_channels=4, conv_2_channels=2),
+          HyperParameters(latent_channels=2, conv_1_channels=2, conv_2_channels=1)]
 
-# Create a bunch of zeros:
-fixed_noise = [randn(hp.latent_dim, 1) |> gpu for _=1:hp.output_x * hp.output_y]
-fixed_labels = [Float32.(Flux.onehotbatch(rand([0], 1), 0:hp.nclasses-1)) |> gpu
-						 for _ =1:hp.output_x * hp.output_y]
-to_image(G, fixed_noise, fixed_labels, hp)
+Gs = [train(hp=hp) for hp in params]
+# Save the networks
+[@save "mymodel"*string(params[i])*".bson" Gs[i] for i=1:length(Gs)]
+
+# Create 10 of each label to visualize for each network
+fixed_noise = [randn(hp.latent_dim, 1) |> hp.device for _=1:hp.output_x * hp.output_y]
+fixed_labels = [Float32.(Flux.onehotbatch([floor(i/10)], 0:hp.nclasses-1)) |> hp.device
+ 						for i =1:hp.output_x * hp.output_y]
+save("visualize_nums.png", to_image(G, fixed_noise, fixed_labels, hp))
