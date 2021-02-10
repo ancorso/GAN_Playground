@@ -14,20 +14,24 @@ using Distributions
 	latent_dim::Int = 100
 	nclasses::Int = 10
 	epochs::Int = 20
-	verbose_freq::Int = 1000
+	verbose_freq::Int = 100
 	output_x::Int = 6
 	output_y::Int = 6
 	αᴰ::Float64 = 0.0002 # discriminator learning rate
 	αᴳ::Float64 = 0.0002 # generator learning rate
+    device::Function = cpu # device to send operations to. Can be cpu or gpu
+    
+    # Generator architecture parameters
+    latent_hidden::Int = 6272 # must be a multiple of 49
 end
 
 struct Discriminator
     d_labels		# Submodel to take labels as input and convert them to the shape of image ie. (28, 28, 1, batch_size)
-    d_common   
+    d_common
 end
 
 function Discriminator(params::HyperParameters)
-	d_labels = Chain(Dense(params.nclasses,784), x-> reshape(x, 28, 28, 1, size(x, 2))) |> gpu
+	d_labels = Chain(Dense(params.nclasses,784), x-> reshape(x, 28, 28, 1, size(x, 2))) |> params.device
     d_common = Chain(Conv((3,3), 2=>128, pad=(1,1), stride=(2,2)),
                   x-> leakyrelu.(x, 0.2f0),
                   Dropout(0.4),
@@ -35,7 +39,7 @@ function Discriminator(params::HyperParameters)
                   x-> leakyrelu.(x, 0.2f0),
                   x-> reshape(x, :, size(x, 4)),
                   Dropout(0.4),
-                  Dense(6272, 1)) |> gpu
+                  Dense(6272, 1)) |> params.device
     Discriminator(d_labels, d_common)
 end
 
@@ -46,19 +50,20 @@ function (m::Discriminator)(x, y)
 end
 
 struct Generator
-    g_labels          # Submodel to take labels as input and convert it to the shape of (7, 7, 1, batch_size) 
+    g_labels          # Submodel to take labels as input and convert it to the shape of (7, 7, 1, batch_size)
     g_latent          # Submodel to take latent_dims as input and convert it to shape of (7, 7, 128, batch_size)
-    g_common    
+    g_common
 end
 
 
 function Generator(params::HyperParameters)
-	g_labels = Chain(Dense(params.nclasses, 49), x-> reshape(x, 7 , 7 , 1 , size(x, 2))) |> gpu
-    g_latent = Chain(Dense(params.latent_dim, 6272), x-> leakyrelu.(x, 0.2f0), x-> reshape(x, 7, 7, 128, size(x, 2))) |> gpu
-    g_common = Chain(ConvTranspose((4, 4), 129=>128; stride=2, pad=1),
-            BatchNorm(128, leakyrelu),
+    g_labels = Chain(Dense(params.nclasses, 49), x-> reshape(x, 7 , 7 , 1 , size(x, 2))) |> params.device
+    latent_channels = Int(params.latent_hidden / 49)
+    g_latent = Chain(Dense(params.latent_dim, params.latent_hidden), x-> leakyrelu.(x, 0.2f0), x-> reshape(x, 7, 7, latent_channels, size(x, 2))) |> params.device
+    g_common = Chain(ConvTranspose((4, 4), latent_channels+1=>latent_channels; stride=2, pad=1),
+            BatchNorm(latent_channels, leakyrelu),
             Dropout(0.25),
-            ConvTranspose((4, 4), 128=>64; stride=2, pad=1),
+            ConvTranspose((4, 4), latent_channels=>64; stride=2, pad=1),
             BatchNorm(64, leakyrelu),
             Conv((7, 7), 64=>1, tanh; stride=1, pad=3)) |> gpu
     Generator(g_labels, g_latent, g_common)
@@ -99,7 +104,7 @@ function to_image(G, fixed_noise, fixed_labels, hp)
     image_array = Gray.(image_array .+ 1f0) ./ 2f0
     return image_array
 end
- 
+
 # Function that returns random input for the generator
 function rand_input(hp)
    x = randn(hp.latent_dim, hp.batch_size) |> gpu
@@ -125,11 +130,10 @@ function train(image_fn;savedir = "regular_cgan", hp = HyperParameters(), G = Ge
 	data, fixed_noise, fixed_labels = image_fn(hp)
 	
     # Training
-	step = 0
+    step = 0
 	@epochs hp.epochs for (x, y) in data
 		loss_D = train_discriminator!(G, D, rand_input(hp)..., x, y, optD)
 		loss_G = train_generator!(G, D, rand_input(hp)..., optG)
-
         if step % hp.verbose_freq == 0
             @info("Train step $(step), Discriminator loss = $loss_D, Generator loss = $loss_G)")
 			name = @sprintf("cgan_steps_%06d.png", step)
@@ -138,7 +142,7 @@ function train(image_fn;savedir = "regular_cgan", hp = HyperParameters(), G = Ge
         step += 1
     end
 	G
-end  
+end
 
 # Train the network:
 G = train(MNIST_images)
