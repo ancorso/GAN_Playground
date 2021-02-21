@@ -145,6 +145,6 @@ function train(s::Settings)
         end
         step += 1
     end
-	G
+	G, D
 end 
 
