@@ -3,10 +3,12 @@ using Flux, BSON, HDF5, Plots
 
 m = BSON.load("concatenated_controllers/full_big_normal_v2.bson")[:model]
 
-input = vcat(randn(2,1000), rand(Uniform(-2,2),2,1000))
+input = vcat(randn(2,1000), rand(Uniform(-1.72,1.72),2,1000))
 out = m(input)
 
-scatter(input[3,:], out[1,:])
+scatter!(input[3,:]*6.366468343804353, out[1,:], label="generated images (Big MLP)", color = :black)
+
+savefig("generated_vs_real_image_error.png")
 
 
 # labels = randn(2,1000)
@@ -29,7 +31,7 @@ y[2,:] ./= std(y[2,:])
 
 real_pred = taxinet(reshape(images[:,:, 1:1000], :, 1000))
 
-scatter(real_pred[1,:], y[1,1:1000]*6.366468343804353, xlabel = "prediction", ylabel="actual", label = "real images", legend = :bottomright)
+scatter(y[1,1:1000]*6.366468343804353, real_pred[1,:], xlabel = "Real", ylabel="Prediction", title = "CTE", label = "real images", legend = :bottomright)
 
 
 fake_images = data[:images]
